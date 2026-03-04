@@ -205,7 +205,7 @@ PATHFINDER does not route blindly. It uses a routing threshold to ensure cross-c
 
 ```
 Route cross-chain IF:
-  (best_chain_impact - unichain_impact) > ROUTING_THRESHOLD
+  (unichain_impact - best_chain_impact) > ROUTING_THRESHOLD
   AND
   data_freshness < MAX_STALENESS_SECONDS
 
