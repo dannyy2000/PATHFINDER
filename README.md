@@ -42,42 +42,66 @@ You send a standard swap transaction to a PATHFINDER-protected pool on Unichain.
 
 ### Step 2 — The Hook Intercepts It
 
-Before execution, the `beforeSwap` hook fires. PATHFINDER pauses and queries the latest liquidity snapshot from Reactive Network.
+Before execution, the `beforeSwap` hook fires. PATHFINDER reads the latest liquidity snapshot from `LiquidityCache.sol` — a storage contract on Unichain that Reactive Network keeps continuously updated in the background.
 
-### Step 3 — Reactive Network Provides The Intelligence
+This is a local read on Unichain. No cross-chain call happens at swap time.
 
-Reactive Network has a smart contract continuously monitoring liquidity events — pool reserves, spreads, recent swap volume — across Uniswap pools on Ethereum, Base, Arbitrum, and Optimism.
+### Step 3 — How Reactive Network Keeps The Cache Fresh
 
-It maintains a live ranking of which chain currently offers the best execution for each major pair and trade size range.
+This is a background process running 24/7, completely independent of any user swap.
 
-When PATHFINDER queries it, Reactive responds immediately with:
+Reactive Network has a Reactive Smart Contract (`LiquidityWatcher.sol`) deployed on the Reactive Kopli network. It subscribes to `Swap` and `ModifyLiquidity` events from Uniswap pools on Ethereum, Base, Arbitrum, and Optimism. Every time a real swap happens on any of those pools, it emits an event. Reactive detects that event and calls `react()` on the watcher automatically.
+
+Inside `react()`, the watcher updates its picture of each chain — reserves, price impact, volume. When the best-chain ranking changes, the watcher sends a callback transaction to `LiquidityCache.sol` on Unichain, writing the latest snapshot.
+
+By the time a user submits a swap, the answer is already sitting in the cache. PATHFINDER just reads it.
+
+The snapshot contains:
 - Which chain has the best price impact for this specific swap size
-- The current spread on each chain
-- Confidence level of the data freshness
+- The current impact on Unichain (for comparison)
+- Timestamp of when the data was last written (for staleness check)
 
 ### Step 4 — Route Decision
 
 ```
-PATHFINDER receives liquidity data:
+PATHFINDER reads liquidity snapshot from cache:
 
   Unichain:  0.50% price impact
-  Base:      0.20% price impact  ← BEST
-  Arbitrum:  0.35% price impact
-  Ethereum:  0.45% price impact
+  Base:      0.20% price impact  ← BEST (Superchain — executable)
+  Optimism:  0.38% price impact  (Superchain — executable)
+  Arbitrum:  0.35% price impact  (monitored for intelligence only)
+  Ethereum:  0.45% price impact  (monitored for intelligence only)
 
 Routing threshold: improvement must exceed 0.15% to justify cross-chain route
 Result: Route to Base (0.30% improvement — worth routing)
 ```
 
-If Unichain is already the best — the swap executes locally, no routing needed.
+If Unichain is already the best — the swap executes on Unichain, no routing needed.
 
-If another chain is meaningfully better — PATHFINDER initiates cross-chain execution via Unichain's Superchain native interoperability.
+If Base or Optimism is meaningfully better — PATHFINDER routes there via Superchain native interop.
+
+Ethereum and Arbitrum data informs the snapshot (Reactive watches their pools) but PATHFINDER never routes execution there — bridging to non-Superchain chains is slow, multi-transaction, and not atomic.
 
 ### Step 5 — Unichain Superchain Executes The Route
 
-Because Unichain is part of the Optimism Superchain, cross-chain execution to Base or Optimism happens with **native single-block message passing** — not a slow multi-step bridge.
+PATHFINDER only routes execution to **Base and Optimism** — both Superchain members like Unichain. Ethereum and Arbitrum are monitored for price intelligence but never routed to, because doing so would require an external bridge: slow, multi-transaction, and not atomic. That defeats the purpose.
 
-The swap executes on the destination chain. The output token is returned to the user on Unichain.
+For Base or Optimism, PATHFINDER calls `L2ToL2CrossDomainMessenger` — a contract built into every Superchain member — and sends a message to the destination chain:
+
+> "Swap this ETH for USDC, return the USDC to this address on Unichain."
+
+The token movement works as follows:
+
+```
+1. User's ETH burns on Unichain              (SuperchainERC20 native transfer)
+2. ETH mints on destination chain
+3. Swap executes on destination Uniswap pool (better price impact)
+4. Output token burns on destination chain
+5. Output token mints on Unichain
+6. User receives output token on Unichain
+```
+
+This works because Unichain, Base, and Optimism share native asset bridging via `SuperchainERC20`. There is no external bridge. The burn-and-mint is a protocol-level operation that happens in a single block.
 
 From the user's perspective: they submitted one swap, got a better price, done.
 
@@ -86,49 +110,92 @@ From the user's perspective: they submitted one swap, got a better price, done.
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                      EXTERNAL CHAINS                             │
-│                                                                  │
-│  Ethereum         Base          Arbitrum        Optimism         │
-│  [Pool Events]    [Pool Events] [Pool Events]   [Pool Events]    │
-│       │               │              │               │           │
-└───────┼───────────────┼──────────────┼───────────────┼───────────┘
-        │               │              │               │
-        └───────────────┴──────────────┴───────────────┘
-                                │
-                                ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                     REACTIVE NETWORK                             │
-│                                                                  │
-│   LiquidityWatcher.sol                                           │
-│   - Subscribes to swap + liquidity events on all 4 chains        │
-│   - Tracks pool reserves and recent price impact per chain       │
-│   - Maintains live best-execution ranking per pair + trade size  │
-│   - Responds to queries from PATHFINDER hook instantly           │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │  liquidity snapshot
-                             │  (best chain + impact data)
-                             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                      UNICHAIN                                    │
-│                                                                  │
-│   Pathfinder.sol — Uniswap v4 Hook                               │
-│   - beforeSwap: query Reactive, decide route                     │
-│   - Local execution if Unichain is best                          │
-│   - Cross-chain execution via Superchain if another chain wins   │
-│   - Returns output token to user on Unichain                     │
-│                                                                  │
-│   ┌──────────────────────────────────────────────────────────┐   │
-│   │          Uniswap v4 Pool (ETH/USDC, etc.)                │   │
-│   │          Protected and routed by PATHFINDER              │   │
-│   └──────────────────────────────────────────────────────────┘   │
-│                                                                  │
-│   ┌──────────────────────────────────────────────────────────┐   │
-│   │          Superchain Bridge (native interop)              │   │
-│   │          Single-block cross-chain execution              │   │
-│   └──────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│              MONITORED CHAINS  (price intelligence only)                │
+│                                                                         │
+│   Ethereum          Base           Arbitrum          Optimism           │
+│   [Pool Events]     [Pool Events]  [Pool Events]     [Pool Events]      │
+│        │                │               │                 │             │
+└────────┼────────────────┼───────────────┼─────────────────┼─────────────┘
+         │                │               │                 │
+         └────────────────┴───────────────┴─────────────────┘
+                                    │
+                     Reactive subscribes to all pool events
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        REACTIVE NETWORK                                 │
+│                                                                         │
+│   LiquidityWatcher.sol                                                  │
+│   - react() fires on every pool event across all 4 chains               │
+│   - Tracks reserves, price impact, volume per chain per pair            │
+│   - Maintains live best-execution ranking                               │
+│   - When ranking changes → pushes updated snapshot to Unichain          │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 │  callback transaction
+                                 │  pushes snapshot proactively
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                            UNICHAIN                                     │
+│                                                                         │
+│   LiquidityCache.sol                                                    │
+│   - Stores latest snapshot per token pair                               │
+│   - Written by Reactive, read by Pathfinder                             │
+│   - Local read — no cross-chain call at swap time                       │
+│                          │                                              │
+│                          │ beforeSwap reads cache                       │
+│                          ▼                                              │
+│   Pathfinder.sol — Uniswap v4 Hook                                      │
+│   - Reads LiquidityCache, runs routing decision                         │
+│   - Executes locally if Unichain is best                                │
+│   - Routes to Base or Optimism via Superchain if they are better        │
+│   - Ethereum and Arbitrum never routed to (not Superchain)              │
+│                                                                         │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │   L2ToL2CrossDomainMessenger + SuperchainERC20                  │   │
+│   │   Tokens burn on Unichain → mint on destination                 │   │
+│   │   Swap executes → output burns → mints back on Unichain         │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
+└───────────────────────┬─────────────────────────────────────────────────┘
+                        │  Superchain execution only
+                        │  (single block, atomic, no external bridge)
+          ┌─────────────┴─────────────┐
+          ▼                           ▼
+        BASE                      OPTIMISM
+   [Swap executes]             [Swap executes]
 ```
+
+---
+
+## Two Independent Processes
+
+PATHFINDER relies on two processes that run completely independently of each other.
+
+**Process 1 — Background intelligence (runs 24/7)**
+
+This has nothing to do with any user swap. Reactive Network is continuously watching pool events on Ethereum, Base, Arbitrum, and Optimism. Every real swap on those chains updates the watcher's picture of liquidity. When the best-chain ranking changes, the watcher pushes a fresh snapshot to `LiquidityCache.sol` on Unichain.
+
+```
+Real swaps happening on Base, Arbitrum, Ethereum, Optimism
+  → Reactive detects pool events
+  → react() updates rankings
+  → LiquidityCache on Unichain gets updated
+  → cache sits there, always fresh, waiting
+```
+
+**Process 2 — User swap (happens on demand)**
+
+When a user submits a swap, PATHFINDER reads the cache that was already updated by Process 1. The routing decision is made from that cached data — no cross-chain call happens mid-transaction.
+
+```
+User submits swap on Unichain
+  → beforeSwap fires
+  → Pathfinder reads LiquidityCache (local, same chain)
+  → routing decision made
+  → executes locally or routes to Base/Optimism
+```
+
+These two processes never block each other. The cache is the handoff point between them.
 
 ---
 
@@ -172,20 +239,23 @@ This segmentation means PATHFINDER is genuinely tailored to trade size, not just
 ```
 pathfinder/
 ├── src/
-│   ├── Pathfinder.sol              # Main Uniswap v4 hook — routing logic
-│   ├── LiquidityWatcher.sol        # Reactive Network contract — cross-chain monitor
-│   ├── MockLiquidityFeed.sol       # Mock liquidity feed for testing and demo
+│   ├── Pathfinder.sol              # Uniswap v4 hook — routing logic (deployed on Unichain)
+│   ├── LiquidityCache.sol          # Storage contract — holds latest snapshot (deployed on Unichain)
+│   ├── LiquidityWatcher.sol        # Reactive Smart Contract — cross-chain monitor (deployed on Reactive Network)
+│   ├── MockLiquidityFeed.sol       # Replaces LiquidityCache during testing — returns controllable hardcoded data
 │   └── interfaces/
 │       ├── IPathfinder.sol         # Hook interface
+│       ├── ILiquidityCache.sol     # Cache read/write interface
 │       └── ILiquidityWatcher.sol   # Reactive watcher interface
 ├── test/
-│   ├── Pathfinder.t.sol            # Unit tests for hook and routing logic
-│   ├── LiquidityWatcher.t.sol      # Unit tests for Reactive contract
-│   └── Integration.t.sol           # End-to-end routing integration tests
+│   ├── Pathfinder.t.sol            # Unit tests — routing decisions, threshold logic, trade size segmentation
+│   ├── LiquidityWatcher.t.sol      # Unit tests — react() updates, staleness, chain ranking
+│   └── Integration.t.sol           # End-to-end — hook reads cache, routes, output verified
 ├── script/
-│   ├── Deploy.s.sol                # Full deployment script
-│   ├── DeployMocks.s.sol           # Deploy mock liquidity feeds for demo
-│   └── SimulateRoute.s.sol         # Demo script — simulate cross-chain routing
+│   ├── Deploy.s.sol                # Deploys Pathfinder + LiquidityCache to Unichain Sepolia
+│   ├── DeployWatcher.s.sol         # Deploys LiquidityWatcher to Reactive Kopli
+│   ├── DeployMocks.s.sol           # Deploys MockLiquidityFeed for demo/testing
+│   └── SimulateRoute.s.sol         # Demo — drain Unichain, deepen Base, watch routing kick in
 ├── lib/                            # Forge dependencies
 ├── foundry.toml
 ├── .env.example
@@ -227,10 +297,11 @@ PATHFINDER's `beforeSwap` hook adds a routing computation step to every swap. On
 Reactive Network is the intelligence layer that makes routing decisions possible.
 
 **What it does:**
-- Deploys a Reactive Smart Contract (LiquidityWatcher) that subscribes to swap and liquidity events on Uniswap pools across Ethereum, Base, Arbitrum, and Optimism simultaneously
-- Tracks pool reserves, recent price impact, and volume for each major pair
-- Maintains a continuously updated ranking of best execution per pair and trade size range
-- Responds to queries from the PATHFINDER hook with a fresh liquidity snapshot
+- Deploys `LiquidityWatcher.sol` on Reactive Kopli — a Reactive Smart Contract that subscribes to Swap and ModifyLiquidity events on Uniswap pools across Ethereum, Base, Arbitrum, and Optimism simultaneously
+- Every time a pool event fires on any of those chains, Reactive calls `react()` on the watcher with the event data
+- The watcher tracks reserves, price impact, and volume per chain per pair and maintains a live best-execution ranking
+- When the ranking changes, the watcher sends a callback transaction to `LiquidityCache.sol` on Unichain, writing the updated snapshot
+- This runs continuously in the background — it is not triggered by user swaps
 
 **Why it is essential:**
 The PATHFINDER hook on Unichain is completely blind to what is happening on other chains. It cannot natively read the state of a Base pool or an Arbitrum pool. Reactive Network bridges that gap — it is the eyes of the system. Without it, PATHFINDER has no data to route with and becomes an ordinary hook. The entire value proposition — best execution across chains — only exists because of Reactive.
@@ -375,7 +446,7 @@ PATHFINDER uses the following Uniswap v4 hook flags:
 | `afterAddLiquidity` | No | — |
 | `beforeRemoveLiquidity` | No | — |
 | `afterRemoveLiquidity` | No | — |
-| `beforeSwap` | Yes | Intercept swap, query Reactive, decide route |
+| `beforeSwap` | Yes | Intercept swap, read LiquidityCache, decide route |
 | `afterSwap` | Yes | Record routing outcome for analytics |
 
 ---
