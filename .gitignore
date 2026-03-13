@@ -1,0 +1,6 @@
+# Environment variables — never commit
+.env
+
+# Foundry build artifacts
+out/
+cache/
