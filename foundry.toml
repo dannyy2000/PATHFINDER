@@ -11,6 +11,7 @@ via_ir = true
 remappings = [
     "v4-core/=lib/v4-core/",
     "forge-std/=lib/forge-std/src/",
+    "reactive-lib/=lib/reactive-lib/src/",
 ]
 
 [profile.default.fuzz]
@@ -23,6 +24,7 @@ base_sepolia = "https://sepolia.base.org"
 arbitrum_sepolia = "https://sepolia-rollup.arbitrum.io/rpc"
 optimism_sepolia = "https://sepolia.optimism.io"
 reactive_kopli = "https://kopli-rpc.reactive.network"
+reactive_lasna = "https://lasna-rpc.rnk.dev/"
 
 [etherscan]
 unichain_sepolia = { key = "${ETHERSCAN_API_KEY}", url = "https://unichain-sepolia.blockscout.com/api" }

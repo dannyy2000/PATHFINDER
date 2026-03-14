@@ -3,14 +3,19 @@ pragma solidity ^0.8.26;
 
 import {ILiquidityCache} from "./interfaces/ILiquidityCache.sol";
 import {ILiquidityWatcher} from "./interfaces/ILiquidityWatcher.sol";
+import {IReactive} from "reactive-lib/interfaces/IReactive.sol";
+import {AbstractReactive} from "reactive-lib/abstract-base/AbstractReactive.sol";
 
 /// @title LiquidityWatcher
-/// @notice Reactive-side watcher that processes pool event updates and pushes
-///         updated snapshots to LiquidityCache when best-chain ranking changes.
-contract LiquidityWatcher is ILiquidityWatcher {
+/// @notice Reactive-side watcher that tracks cross-chain impact updates for a token pair.
+///         In local tests and demos, `react(bytes)` writes directly to LiquidityCache.
+///         On Reactive Network, `react(LogRecord)` emits a callback to Unichain Sepolia.
+contract LiquidityWatcher is ILiquidityWatcher, AbstractReactive {
     uint8 public constant CHAIN_UNICHAIN = 0;
     uint8 public constant CHAIN_BASE = 1;
     uint8 public constant CHAIN_OPTIMISM = 2;
+    uint256 public constant UNICHAIN_SEPOLIA_CHAIN_ID = 1301;
+    uint64 public constant CALLBACK_GAS_LIMIT = 800_000;
 
     address public immutable owner;
     ILiquidityCache public cache;
@@ -33,13 +38,40 @@ contract LiquidityWatcher is ILiquidityWatcher {
         _;
     }
 
-    constructor(address cache_) {
+    constructor(address cache_) payable {
         owner = msg.sender;
         _setCache(cache_);
     }
 
     /// @inheritdoc ILiquidityWatcher
-    function react(bytes calldata eventData) external {
+    /// @dev Local/manual ingestion path used by tests and controlled demo flows.
+    function react(bytes calldata eventData) external onlyOwner {
+        _processImpactUpdate(eventData, true);
+    }
+
+    /// @notice Reactive entry point called by the Reactive Network runtime.
+    /// @dev Expects the origin event data to encode (tokenA, tokenB, chain, impactBps).
+    function react(IReactive.LogRecord calldata log) external vmOnly {
+        _processImpactUpdate(log.data, false);
+    }
+
+    /// @inheritdoc ILiquidityWatcher
+    function subscribe(
+        uint256 chainId,
+        address targetContract,
+        uint256 topic0,
+        uint256 topic1,
+        uint256 topic2,
+        uint256 topic3
+    ) external onlyOwner {
+        if (!vm) {
+            service.subscribe(chainId, targetContract, topic0, topic1, topic2, topic3);
+        }
+
+        emit SubscriptionRegistered(chainId, targetContract, topic0, topic1, topic2, topic3);
+    }
+
+    function _processImpactUpdate(bytes calldata eventData, bool localWrite) internal {
         (address tokenA, address tokenB, uint8 chain, uint256 impactBps) =
             abi.decode(eventData, (address, address, uint8, uint256));
 
@@ -67,7 +99,14 @@ contract LiquidityWatcher is ILiquidityWatcher {
         BestState memory bestState = _bestStates[key];
 
         if (!bestState.initialized || bestState.bestChain != bestChain) {
-            cache.writeSnapshot(tokenA, tokenB, snapshot);
+            if (localWrite) {
+                cache.writeSnapshot(tokenA, tokenB, snapshot);
+            } else {
+                bytes memory payload = abi.encodeCall(
+                    ILiquidityCache.writeSnapshot, (tokenA, tokenB, snapshot)
+                );
+                emit Callback(UNICHAIN_SEPOLIA_CHAIN_ID, address(cache), CALLBACK_GAS_LIMIT, payload);
+            }
             _bestStates[key] = BestState({initialized: true, bestChain: bestChain});
             emit SnapshotPushed(tokenA, tokenB, bestChain, bestImpact, snapshot.timestamp);
         }
