@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {LiquidityWatcher} from "../src/LiquidityWatcher.sol";
 import {LiquidityCache} from "../src/LiquidityCache.sol";
 import {ILiquidityCache} from "../src/interfaces/ILiquidityCache.sol";
+import {IReactive} from "reactive-lib/interfaces/IReactive.sol";
 
 contract LiquidityWatcherTest is Test {
     LiquidityCache internal cache;
@@ -64,6 +65,44 @@ contract LiquidityWatcherTest is Test {
         assertEq(bestChain, 1);
         assertEq(bestImpact, 20);
         assertEq(timestamp, 110);
+    }
+
+    function test_reactivePath_emitsCallbackWhenBestChainChanges() external {
+        vm.warp(500);
+
+        IReactive.LogRecord memory log = IReactive.LogRecord({
+            chain_id: 84532,
+            _contract: address(0xBEEF),
+            topic_0: 0,
+            topic_1: 0,
+            topic_2: 0,
+            topic_3: 0,
+            data: abi.encode(TOKEN_A, TOKEN_B, uint8(1), uint256(18)),
+            block_number: 0,
+            op_code: 0,
+            block_hash: 0,
+            tx_hash: 0,
+            log_index: 0
+        });
+
+        bytes memory payload = abi.encodeCall(
+            ILiquidityCache.writeSnapshot,
+            (
+                TOKEN_A,
+                TOKEN_B,
+                ILiquidityCache.LiquiditySnapshot({
+                    unichainImpactBps: 0,
+                    baseImpactBps: 18,
+                    optimismImpactBps: 0,
+                    timestamp: 500
+                })
+            )
+        );
+
+        vm.expectEmit(true, true, true, true);
+        emit IReactive.Callback(1301, address(cache), 800_000, payload);
+
+        watcher.react(log);
     }
 
     function test_react_doesNotPushWhenRankingUnchanged() external {
