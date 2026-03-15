@@ -17,7 +17,7 @@ contract LiquidityWatcherTest is Test {
 
     function setUp() external {
         cache = new LiquidityCache();
-        watcher = new LiquidityWatcher(address(cache));
+        watcher = new LiquidityWatcher(address(cache), address(0), address(0));
         cache.setWriter(address(watcher));
     }
 
