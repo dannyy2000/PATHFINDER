@@ -15,7 +15,8 @@
 
 - Daniel deployed `LiquidityCache` and shared the address.
 - Ola deployed `LiquidityWatcher` pointing at that cache.
-- Daniel should call `LiquidityCache.setWriter(0x9299472A6399Fd1027ebF067571Eb3e3D7837FC4)`.
+- Daniel called `LiquidityCache.setWriter(0x9299472A6399Fd1027ebF067571Eb3e3D7837FC4)` — callback proxy is now authorized to write snapshots.
+- Next: Ola sets up Reactive subscriptions on Base and Optimism so the watcher starts receiving live pool events.
 
 ## References
 
