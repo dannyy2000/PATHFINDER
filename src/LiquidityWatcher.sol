@@ -15,7 +15,11 @@ contract LiquidityWatcher is ILiquidityWatcher, AbstractReactive {
     uint8 public constant CHAIN_BASE = 1;
     uint8 public constant CHAIN_OPTIMISM = 2;
     uint256 public constant UNICHAIN_SEPOLIA_CHAIN_ID = 1301;
+    uint256 public constant BASE_SEPOLIA_CHAIN_ID = 84532;
+    uint256 public constant OPTIMISM_SEPOLIA_CHAIN_ID = 11155420;
     uint64 public constant CALLBACK_GAS_LIMIT = 800_000;
+    uint256 public constant IMPACT_UPDATED_TOPIC0 =
+        uint256(keccak256("ImpactUpdated(address,address,uint8,uint256)"));
 
     address public immutable owner;
     ILiquidityCache public cache;
@@ -38,9 +42,33 @@ contract LiquidityWatcher is ILiquidityWatcher, AbstractReactive {
         _;
     }
 
-    constructor(address cache_) payable {
+    constructor(address cache_, address baseFeed_, address optimismFeed_) payable {
         owner = msg.sender;
         _setCache(cache_);
+
+        if (!vm) {
+            if (baseFeed_ != address(0)) {
+                _subscribe(
+                    BASE_SEPOLIA_CHAIN_ID,
+                    baseFeed_,
+                    IMPACT_UPDATED_TOPIC0,
+                    REACTIVE_IGNORE,
+                    REACTIVE_IGNORE,
+                    REACTIVE_IGNORE
+                );
+            }
+
+            if (optimismFeed_ != address(0)) {
+                _subscribe(
+                    OPTIMISM_SEPOLIA_CHAIN_ID,
+                    optimismFeed_,
+                    IMPACT_UPDATED_TOPIC0,
+                    REACTIVE_IGNORE,
+                    REACTIVE_IGNORE,
+                    REACTIVE_IGNORE
+                );
+            }
+        }
     }
 
     /// @inheritdoc ILiquidityWatcher
@@ -64,11 +92,7 @@ contract LiquidityWatcher is ILiquidityWatcher, AbstractReactive {
         uint256 topic2,
         uint256 topic3
     ) external onlyOwner {
-        if (!vm) {
-            service.subscribe(chainId, targetContract, topic0, topic1, topic2, topic3);
-        }
-
-        emit SubscriptionRegistered(chainId, targetContract, topic0, topic1, topic2, topic3);
+        _subscribe(chainId, targetContract, topic0, topic1, topic2, topic3);
     }
 
     function _processImpactUpdate(bytes calldata eventData, bool localWrite) internal {
@@ -148,6 +172,21 @@ contract LiquidityWatcher is ILiquidityWatcher, AbstractReactive {
         address oldCache = address(cache);
         cache = ILiquidityCache(cache_);
         emit CacheUpdated(oldCache, cache_);
+    }
+
+    function _subscribe(
+        uint256 chainId,
+        address targetContract,
+        uint256 topic0,
+        uint256 topic1,
+        uint256 topic2,
+        uint256 topic3
+    ) internal {
+        if (!vm) {
+            service.subscribe(chainId, targetContract, topic0, topic1, topic2, topic3);
+        }
+
+        emit SubscriptionRegistered(chainId, targetContract, topic0, topic1, topic2, topic3);
     }
 
     function _bestChainForKey(bytes32 key, ILiquidityCache.LiquiditySnapshot memory snapshot)
