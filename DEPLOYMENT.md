@@ -8,7 +8,7 @@
 ## Live Addresses
 
 - `LiquidityCache` on Unichain Sepolia: `0x81f972eF7A8D5f5F043573A42cccA590DC8e203a`
-- `LiquidityWatcher` on Reactive Lasna: `0xeB26B1c46D552807253Fd93aB2F63C0A37f3Fc79`
+- `LiquidityWatcher` on Reactive Lasna: `0xAd6c53ED6933027bAF1c860050df46BA5CaDD975` (owner: Daniel)
 - Unichain Sepolia Callback Proxy: `0x9299472A6399Fd1027ebF067571Eb3e3D7837FC4`
 - `DemoImpactFeed` on Base Sepolia: `0xf2cdD5a3dE69E3E0e7f1a04Fd48F771C63b32C32`
 - `DemoImpactFeed` on Optimism Sepolia: `0xeB26B1c46D552807253Fd93aB2F63C0A37f3Fc79`
@@ -16,10 +16,12 @@
 ## Current Handoff
 
 - Daniel deployed `LiquidityCache` and shared the address.
-- Ola deployed `LiquidityWatcher` pointing at that cache.
-- Daniel called `LiquidityCache.setWriter(0x9299472A6399Fd1027ebF067571Eb3e3D7837FC4)` — callback proxy is now authorized to write snapshots.
-- Ola deployed demo impact feeds on Base Sepolia and Optimism Sepolia for the fast demo path.
-- Current blocker: Reactive `subscribe(...)` is reverting inside the Lasna system contract, so mock feed subscriptions are not live yet.
+- Ola deployed `LiquidityWatcher` (original, blocked by subscription revert).
+- Daniel called `LiquidityCache.setWriter(0x9299472A6399Fd1027ebF067571Eb3e3D7837FC4)` — callback proxy authorized.
+- Ola deployed demo impact feeds on Base Sepolia and Optimism Sepolia.
+- Daniel redeployed `LiquidityWatcher` (0xAd6c53...) owned by his wallet and subscribed to both feeds — Base Sepolia and Optimism Sepolia subscriptions confirmed live on Lasna.
+- `setWriter` unchanged — same Lasna callback proxy serves all reactive contracts targeting Unichain Sepolia.
+- Next: trigger `publishImpact` on the demo feeds and verify `SnapshotPushed` lands on `LiquidityCache`.
 
 ## References
 
