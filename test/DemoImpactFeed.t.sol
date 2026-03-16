@@ -14,6 +14,11 @@ contract DemoImpactFeedTest is Test {
         baseFeed = new DemoImpactFeed(1);
     }
 
+    function test_constructor_setsOwnerAndSourceChain() external view {
+        assertEq(baseFeed.owner(), address(this));
+        assertEq(baseFeed.sourceChain(), 1);
+    }
+
     function test_publishImpact_emitsConfiguredChain() external {
         vm.expectEmit(false, false, false, true);
         emit DemoImpactFeed.ImpactUpdated(TOKEN_A, TOKEN_B, 1, 22);
@@ -30,5 +35,10 @@ contract DemoImpactFeedTest is Test {
     function test_constructor_revertsOnInvalidChain() external {
         vm.expectRevert(DemoImpactFeed.InvalidChain.selector);
         new DemoImpactFeed(0);
+    }
+
+    function test_constructor_revertsWhenChainIsAboveSupportedRange() external {
+        vm.expectRevert(DemoImpactFeed.InvalidChain.selector);
+        new DemoImpactFeed(3);
     }
 }
