@@ -8,6 +8,7 @@ import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
+import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 
 import {Pathfinder} from "../src/Pathfinder.sol";
 import {IPathfinder} from "../src/interfaces/IPathfinder.sol";
@@ -87,6 +88,38 @@ contract PathfinderTest is Test {
         }));
 
         vm.prank(poolManager);
+        hook.afterInitialize(address(this), key, 0, 0);
+    }
+
+    function test_constructor_setsImmutableAddresses() public view {
+        assertEq(address(hook.poolManager()), poolManager);
+        assertEq(address(hook.cache()), address(feed));
+    }
+
+    function test_afterInitialize_usesDefaultConfigWhenNothingRegistered() public {
+        Pathfinder defaultHook = new Pathfinder(IPoolManager(poolManager), ILiquidityCache(address(feed)));
+        PoolKey memory defaultKey = PoolKey({
+            currency0: Currency.wrap(address(0x3000)),
+            currency1: Currency.wrap(address(0x4000)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(defaultHook))
+        });
+        bytes32 defaultPoolId = PoolId.unwrap(defaultKey.toId());
+
+        vm.prank(poolManager);
+        bytes4 selector = defaultHook.afterInitialize(address(this), defaultKey, 0, 0);
+
+        IPathfinder.PoolConfig memory cfg = defaultHook.getPoolConfig(defaultPoolId);
+        assertEq(selector, IHooks.afterInitialize.selector);
+        assertEq(cfg.routingThreshold, defaultHook.DEFAULT_ROUTING_THRESHOLD());
+        assertEq(cfg.maxStaleness, defaultHook.DEFAULT_MAX_STALENESS());
+        assertEq(cfg.smallTradeLimit, 0);
+        assertEq(cfg.whaleTradeLimit, type(uint256).max);
+    }
+
+    function test_afterInitialize_onlyPoolManager() public {
+        vm.expectRevert(Pathfinder.NotPoolManager.selector);
         hook.afterInitialize(address(this), key, 0, 0);
     }
 
@@ -182,6 +215,37 @@ contract PathfinderTest is Test {
         hook.beforeSwap(address(this), key, params, "");
     }
 
+    function test_beforeSwap_revertsWhenPoolNotInitialized() public {
+        Pathfinder uninitializedHook = new Pathfinder(IPoolManager(poolManager), ILiquidityCache(address(feed)));
+        PoolKey memory uninitializedKey = PoolKey({
+            currency0: Currency.wrap(address(0x3000)),
+            currency1: Currency.wrap(address(0x4000)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(uninitializedHook))
+        });
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -int256(SMALL_LIMIT + 1),
+            sqrtPriceLimitX96: 0
+        });
+
+        vm.prank(poolManager);
+        vm.expectRevert(Pathfinder.PoolNotInitialized.selector);
+        uninitializedHook.beforeSwap(address(this), uninitializedKey, params, "");
+    }
+
+    function test_beforeSwap_onlyPoolManager() public {
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -int256(SMALL_LIMIT + 1),
+            sqrtPriceLimitX96: 0
+        });
+
+        vm.expectRevert(Pathfinder.NotPoolManager.selector);
+        hook.beforeSwap(address(this), key, params, "");
+    }
+
     /// Stale cache data → falls back to local
     function test_staleData_fallsBackToLocal() public {
         vm.warp(1_000);  // ensure block.timestamp > MAX_STALENESS so subtraction is safe
@@ -220,6 +284,40 @@ contract PathfinderTest is Test {
 
         vm.expectEmit(true, false, false, true);
         emit Pathfinder.SwapRouted(poolId, hook.CHAIN_BASE(), "whale_route", 5);
+
+        vm.prank(poolManager);
+        hook.beforeSwap(address(this), key, params, "");
+    }
+
+    function test_exactThreshold_executesLocally() public {
+        ILiquidityCache.LiquiditySnapshot memory snap = _snap(100, 85, 120); // improvement = 15 == threshold
+        feed.set(TOKEN_A, TOKEN_B, snap);
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -int256(SMALL_LIMIT + 1),
+            sqrtPriceLimitX96: 0
+        });
+
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapRouted(poolId, hook.CHAIN_UNICHAIN(), "below_threshold", 0);
+
+        vm.prank(poolManager);
+        hook.beforeSwap(address(this), key, params, "");
+    }
+
+    function test_positiveAmountSpecified_usesAbsoluteTradeSize() public {
+        ILiquidityCache.LiquiditySnapshot memory snap = _snap(100, 80, 120);
+        feed.set(TOKEN_A, TOKEN_B, snap);
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: int256(SMALL_LIMIT + 1),
+            sqrtPriceLimitX96: 0
+        });
+
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapRouted(poolId, hook.CHAIN_BASE(), "improvement_route", 20);
 
         vm.prank(poolManager);
         hook.beforeSwap(address(this), key, params, "");
@@ -278,5 +376,63 @@ contract PathfinderTest is Test {
 
         vm.prank(poolManager);
         hook.beforeSwap(address(this), key, params, "");
+    }
+
+    function test_afterSwap_emitsSettledEvent() public {
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: false,
+            amountSpecified: -int256(1234),
+            sqrtPriceLimitX96: 0
+        });
+
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapSettled(poolId, -int256(1234), false);
+
+        vm.prank(poolManager);
+        (bytes4 selector, int128 unspecified) = hook.afterSwap(address(this), key, params, BalanceDelta.wrap(0), "");
+
+        assertEq(selector, IHooks.afterSwap.selector);
+        assertEq(unspecified, 0);
+    }
+
+    function test_afterSwap_onlyPoolManager() public {
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -int256(1234),
+            sqrtPriceLimitX96: 0
+        });
+
+        vm.expectRevert(Pathfinder.NotPoolManager.selector);
+        hook.afterSwap(address(this), key, params, BalanceDelta.wrap(0), "");
+    }
+
+    function test_unusedHooks_revert() public {
+        vm.expectRevert(Pathfinder.HookNotImplemented.selector);
+        hook.beforeInitialize(address(this), key, 0);
+
+        IPoolManager.ModifyLiquidityParams memory liquidityParams = IPoolManager.ModifyLiquidityParams({
+            tickLower: -60,
+            tickUpper: 60,
+            liquidityDelta: 1,
+            salt: bytes32(0)
+        });
+
+        vm.expectRevert(Pathfinder.HookNotImplemented.selector);
+        hook.beforeAddLiquidity(address(this), key, liquidityParams, "");
+
+        vm.expectRevert(Pathfinder.HookNotImplemented.selector);
+        hook.afterAddLiquidity(address(this), key, liquidityParams, BalanceDelta.wrap(0), BalanceDelta.wrap(0), "");
+
+        vm.expectRevert(Pathfinder.HookNotImplemented.selector);
+        hook.beforeRemoveLiquidity(address(this), key, liquidityParams, "");
+
+        vm.expectRevert(Pathfinder.HookNotImplemented.selector);
+        hook.afterRemoveLiquidity(address(this), key, liquidityParams, BalanceDelta.wrap(0), BalanceDelta.wrap(0), "");
+
+        vm.expectRevert(Pathfinder.HookNotImplemented.selector);
+        hook.beforeDonate(address(this), key, 0, 0, "");
+
+        vm.expectRevert(Pathfinder.HookNotImplemented.selector);
+        hook.afterDonate(address(this), key, 0, 0, "");
     }
 }
