@@ -20,10 +20,9 @@ import {ILiquidityCache} from "../src/interfaces/ILiquidityCache.sol";
 //   forge script script/SmokeTest.s.sol:CheckCache \
 //     --rpc-url $UNICHAIN_SEPOLIA_RPC -vvvv
 
-// WETH/USDC — standard OP-stack addresses
+// Unichain Sepolia canonical tokens
 address constant WETH = 0x4200000000000000000000000000000000000006;
-// Using a single USDC address for the pair key — same on both sides
-address constant USDC = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
+address constant USDC = 0x31d0220469e10c4E71834a79b1f276d740d3768F;
 
 /// @notice Publish a Base Sepolia impact reading (chain = 1, impact = 40 bps)
 contract PublishBase is Script {
