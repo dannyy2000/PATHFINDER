@@ -50,7 +50,9 @@ This is a local read on Unichain. No cross-chain call happens at swap time.
 
 This is a background process running 24/7, completely independent of any user swap.
 
-Reactive Network has a Reactive Smart Contract (`LiquidityWatcher.sol`) deployed on the Reactive Kopli network. It subscribes to `Swap` and `ModifyLiquidity` events from Uniswap pools on Ethereum, Base, Arbitrum, and Optimism. Every time a real swap happens on any of those pools, it emits an event. Reactive detects that event and calls `react()` on the watcher automatically.
+Reactive Network has a Reactive Smart Contract (`LiquidityWatcher.sol`) deployed on the Reactive Lasna network. It subscribes to `ImpactUpdated` events emitted by `DemoImpactFeed` contracts deployed on Base Sepolia and Optimism Sepolia. Every time a new impact reading is published on either feed, Reactive detects the event and calls `react()` on the watcher automatically.
+
+In production this subscription would point directly at `Swap` and `ModifyLiquidity` events from Uniswap pools on Ethereum, Base, Arbitrum, and Optimism — the `DemoImpactFeed` contracts are a testnet stand-in that let the demo publish controlled impact values without needing to drive real pool activity.
 
 Inside `react()`, the watcher updates its picture of each chain — reserves, price impact, volume. When the best-chain ranking changes, the watcher sends a callback transaction to `LiquidityCache.sol` on Unichain, writing the latest snapshot.
 
@@ -328,6 +330,31 @@ Traditional price oracles tell you the price. Reactive tells you the liquidity c
 
 ---
 
+## Deployed Contracts
+
+### Unichain Sepolia
+
+| Contract | Address |
+|---|---|
+| `LiquidityCache` | [`0x81f972eF7A8D5f5F043573A42cccA590DC8e203a`](https://sepolia.uniscan.xyz/address/0x81f972eF7A8D5f5F043573A42cccA590DC8e203a) |
+| `Pathfinder` (hook) | [`0xCcDDC149c1C8C811d00794B340c8f316d9A550C0`](https://sepolia.uniscan.xyz/address/0xCcDDC149c1C8C811d00794B340c8f316d9A550C0) |
+| Uniswap v4 `PoolManager` | [`0x00B036B58a818B1BC34d502D3fE730Db729e62AC`](https://sepolia.uniscan.xyz/address/0x00B036B58a818B1BC34d502D3fE730Db729e62AC) |
+
+### Reactive Lasna
+
+| Contract | Address |
+|---|---|
+| `LiquidityWatcher` | [`0xAd6c53ED6933027bAF1c860050df46BA5CaDD975`](https://lasna.rnk.dev/address/0xAd6c53ED6933027bAF1c860050df46BA5CaDD975) |
+
+### Demo Feeds
+
+| Chain | Contract | Address |
+|---|---|---|
+| Base Sepolia | `DemoImpactFeed` | [`0xAd6c53ED6933027bAF1c860050df46BA5CaDD975`](https://sepolia.basescan.org/address/0xAd6c53ED6933027bAF1c860050df46BA5CaDD975) |
+| Optimism Sepolia | `DemoImpactFeed` | [`0xAd6c53ED6933027bAF1c860050df46BA5CaDD975`](https://sepolia-optimism.etherscan.io/address/0xAd6c53ED6933027bAF1c860050df46BA5CaDD975) |
+
+---
+
 ## Deployment
 
 ### Prerequisites
@@ -338,8 +365,8 @@ curl -L https://foundry.paradigm.xyz | bash
 foundryup
 
 # Clone the repo
-git clone https://github.com/yourusername/pathfinder
-cd pathfinder
+git clone https://github.com/dannyy2000/PATHFINDER
+cd PATHFINDER
 
 # Install dependencies
 forge install
@@ -372,10 +399,10 @@ forge script script/InitializePool.s.sol \
 
 ```bash
 # 1. Deploy DemoImpactFeed on Base Sepolia and Optimism Sepolia
-forge script script/DeployMocks.s.sol \
+TARGET_CHAIN=base forge script script/DeployMocks.s.sol \
   --rpc-url $BASE_SEPOLIA_RPC --broadcast --private-key $PRIVATE_KEY
 
-forge script script/DeployMocks.s.sol \
+TARGET_CHAIN=optimism forge script script/DeployMocks.s.sol \
   --rpc-url $OPTIMISM_SEPOLIA_RPC --broadcast --private-key $PRIVATE_KEY
 
 # 2. Deploy LiquidityWatcher to Reactive Lasna
@@ -448,6 +475,7 @@ forge test
 forge test -vvvv
 
 # Coverage report — scripts excluded automatically via foundry.toml
+# All 5 source contracts: 100% lines, 100% statements, 100% branches
 forge coverage --report summary
 
 # Run only Pathfinder routing tests
@@ -481,6 +509,16 @@ forge test --gas-report
 | `DemoImpactFeedExtrasTest` | 8 | Extended feed scenarios |
 | `MockLiquidityFeedTest` | 2 | Test helper correctness |
 | `MockLiquidityFeedExtrasTest` | 9 | Extended mock scenarios |
+
+**Coverage (scripts excluded via `foundry.toml`):**
+
+| Contract | Lines | Statements | Branches | Functions |
+|---|---|---|---|---|
+| `Pathfinder.sol` | 100% (64/64) | 100% (64/64) | 100% (11/11) | 100% (15/15) |
+| `LiquidityWatcher.sol` | 100% (78/78) | 100% (82/82) | 100% (19/19) | 100% (13/13) |
+| `LiquidityCache.sol` | 100% (15/15) | 100% (14/14) | 100% (2/2) | 100% (5/5) |
+| `DemoImpactFeed.sol` | 100% (8/8) | 100% (9/9) | 100% (2/2) | 100% (3/3) |
+| `MockLiquidityFeed.sol` | 100% (12/12) | 100% (9/9) | 100% (0/0) | 100% (5/5) |
 
 ---
 
