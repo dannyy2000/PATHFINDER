@@ -84,28 +84,20 @@ If Base or Optimism is meaningfully better — PATHFINDER routes there via Super
 
 Ethereum and Arbitrum data informs the snapshot (Reactive watches their pools) but PATHFINDER never routes execution there — bridging to non-Superchain chains is slow, multi-transaction, and not atomic.
 
-### Step 5 — Unichain Superchain Executes The Route
+### Step 5 — Routing Decision Is Emitted
 
-PATHFINDER only routes execution to **Base and Optimism** — both Superchain members like Unichain. Ethereum and Arbitrum are monitored for price intelligence but never routed to, because doing so would require an external bridge: slow, multi-transaction, and not atomic. That defeats the purpose.
-
-For Base or Optimism, PATHFINDER calls `L2ToL2CrossDomainMessenger` — a contract built into every Superchain member — and sends a message to the destination chain:
-
-> "Swap this ETH for USDC, return the USDC to this address on Unichain."
-
-The token movement works as follows:
+When `beforeSwap` completes, PATHFINDER emits a `SwapRouted` event with:
+- `destination` — which chain has the best execution (0 = Unichain, 1 = Base, 2 = Optimism)
+- `reason` — why this route was chosen (`"local_best"`, `"small_trade"`, `"whale_route"`, `"improvement_route"`, `"stale_data"`)
+- `improvementBps` — how many basis points better the cross-chain venue is
 
 ```
-1. User's ETH burns on Unichain              (SuperchainERC20 native transfer)
-2. ETH mints on destination chain
-3. Swap executes on destination Uniswap pool (better price impact)
-4. Output token burns on destination chain
-5. Output token mints on Unichain
-6. User receives output token on Unichain
+SwapRouted(poolId, destination=1, reason="improvement_route", improvementBps=30)
 ```
 
-This works because Unichain, Base, and Optimism share native asset bridging via `SuperchainERC20`. There is no external bridge. The burn-and-mint is a protocol-level operation that happens in a single block.
+This event is the output of the routing intelligence layer — the data a settlement layer needs to execute the cross-chain swap. The natural next step is for an execution layer to consume this event and settle via `L2ToL2CrossDomainMessenger` and `SuperchainERC20` (available natively on all Superchain members including Unichain, Base, and Optimism). PATHFINDER is architected so this settlement layer can be added without changing the hook itself.
 
-From the user's perspective: they submitted one swap, got a better price, done.
+PATHFINDER only considers **Base and Optimism** as routing destinations — both Superchain members. Ethereum and Arbitrum data informs the snapshot but are never routed to, as doing so would require a non-atomic external bridge.
 
 ---
 
@@ -149,22 +141,23 @@ From the user's perspective: they submitted one swap, got a better price, done.
 │                          ▼                                              │
 │   Pathfinder.sol — Uniswap v4 Hook                                      │
 │   - Reads LiquidityCache, runs routing decision                         │
-│   - Executes locally if Unichain is best                                │
-│   - Routes to Base or Optimism via Superchain if they are better        │
-│   - Ethereum and Arbitrum never routed to (not Superchain)              │
+│   - Emits SwapRouted(destination, reason, improvementBps)               │
+│   - destination=0 → executes locally on Unichain                       │
+│   - destination=1/2 → signals Base or Optimism as best venue           │
+│   - Ethereum and Arbitrum never considered for routing                  │
 │                                                                         │
 │   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │   Settlement layer (roadmap)                                    │   │
 │   │   L2ToL2CrossDomainMessenger + SuperchainERC20                  │   │
-│   │   Tokens burn on Unichain → mint on destination                 │   │
-│   │   Swap executes → output burns → mints back on Unichain         │   │
+│   │   Consumes SwapRouted signal → executes cross-chain atomically  │   │
 │   └─────────────────────────────────────────────────────────────────┘   │
 └───────────────────────┬─────────────────────────────────────────────────┘
-                        │  Superchain execution only
-                        │  (single block, atomic, no external bridge)
+                        │  SwapRouted signal (implemented)
+                        │  Cross-chain settlement (roadmap — Superchain native)
           ┌─────────────┴─────────────┐
           ▼                           ▼
         BASE                      OPTIMISM
-   [Swap executes]             [Swap executes]
+   [Best venue]               [Best venue]
 ```
 
 ---
@@ -194,7 +187,7 @@ User submits swap on Unichain
   → beforeSwap fires
   → Pathfinder reads LiquidityCache (local, same chain)
   → routing decision made
-  → executes locally or routes to Base/Optimism
+  → emits SwapRouted(destination, reason, improvementBps)
 ```
 
 These two processes never block each other. The cache is the handoff point between them.
@@ -303,7 +296,7 @@ pathfinder/
 PATHFINDER is built specifically around Unichain's unique position in the ecosystem and relies on two of its properties:
 
 **1. Superchain Native Interoperability**
-Unichain is part of the Optimism Superchain. This means cross-chain execution to Base, Optimism, and other Superchain members happens via native single-block message passing — not a traditional multi-step bridge. When PATHFINDER routes a swap to Base, it happens atomically in a single transaction from the user's perspective. This is only possible because of Unichain's Superchain membership. No other chain offers this for cross-chain routing today.
+Unichain is part of the Optimism Superchain. PATHFINDER is designed around this membership — it only ever signals Base and Optimism as routing destinations because they are the Superchain members where cross-chain settlement can eventually happen via `L2ToL2CrossDomainMessenger` and `SuperchainERC20` natively. Ethereum and Arbitrum are excluded from routing targets precisely because they are not Superchain members and would require a non-atomic external bridge. The routing intelligence layer (this hook) is built so a Superchain settlement layer can be added on top without changing the hook itself.
 
 **2. Speed**
 Unichain's 1-second blocks mean the routing decision and execution happen before liquidity conditions change. A 12-second block window on Ethereum mainnet is long enough for conditions to shift between when Reactive provides its snapshot and when the swap actually executes. Unichain's speed keeps the routing data fresh and the execution accurate.
