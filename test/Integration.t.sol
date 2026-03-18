@@ -93,4 +93,36 @@ contract IntegrationTest is Test {
         vm.prank(POOL_MANAGER);
         hook.beforeSwap(address(this), key, params, "");
     }
+
+    /// Cache is stale on first swap; watcher receives new data that changes best chain,
+    /// writing a fresh snapshot; second swap then routes to the new best chain.
+    function test_snapshotUpdateBetweenSwaps_changesRouting() external {
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -int256(5_000),
+            sqrtPriceLimitX96: 0
+        });
+
+        // At t=1000 write snapshot: unichain=100, base=20 → best = Base
+        vm.warp(1_000);
+        watcher.react(abi.encode(TOKEN_A, TOKEN_B, uint8(0), uint256(100)));
+        watcher.react(abi.encode(TOKEN_A, TOKEN_B, uint8(1), uint256(20)));
+
+        // Advance past maxStaleness=30 → snapshot is now stale
+        vm.warp(1_050);
+
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapRouted(poolId, hook.CHAIN_UNICHAIN(), "stale_data", 0);
+        vm.prank(POOL_MANAGER);
+        hook.beforeSwap(address(this), key, params, "");
+
+        // New impact arrives: Optimism=5 beats Base=20 → ranking changes → watcher pushes fresh snapshot at t=1050
+        watcher.react(abi.encode(TOKEN_A, TOKEN_B, uint8(2), uint256(5)));
+
+        // Second swap — fresh data (ts=1050), Optimism best by 95 bps → routes to Optimism
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapRouted(poolId, hook.CHAIN_OPTIMISM(), "improvement_route", 95);
+        vm.prank(POOL_MANAGER);
+        hook.beforeSwap(address(this), key, params, "");
+    }
 }

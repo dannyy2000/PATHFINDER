@@ -61,6 +61,64 @@ contract PathfinderExtrasTest is Test {
         poolId = PoolId.unwrap(key.toId());
     }
 
+    function test_twoPools_routingIsIsolated() public {
+        // Initialize pool1 (key from setUp — was never initialized there)
+        hook.registerConfig(key, IPathfinder.PoolConfig({
+            routingThreshold: 1,
+            maxStaleness:     1000,
+            smallTradeLimit:  0,
+            whaleTradeLimit:  type(uint256).max
+        }));
+        vm.prank(poolManager);
+        hook.afterInitialize(address(this), key, 0, 0);
+
+        // Second pool on the same hook — different tokens, different config
+        PoolKey memory key2 = PoolKey({
+            currency0:   Currency.wrap(address(0x3030)),
+            currency1:   Currency.wrap(address(0x4040)),
+            fee:         500,
+            tickSpacing: 10,
+            hooks:       IHooks(address(hook))
+        });
+        bytes32 poolId2 = PoolId.unwrap(key2.toId());
+
+        hook.registerConfig(key2, IPathfinder.PoolConfig({
+            routingThreshold: 5,
+            maxStaleness:     1000,
+            smallTradeLimit:  0,
+            whaleTradeLimit:  type(uint256).max
+        }));
+        vm.prank(poolManager);
+        hook.afterInitialize(address(this), key2, 0, 0);
+
+        // Pool1 (TOKEN_A/B): unichain is best
+        feed.set(TOKEN_A, TOKEN_B, ILiquidityCache.LiquiditySnapshot({
+            unichainImpactBps: 10, baseImpactBps: 90, optimismImpactBps: 90,
+            timestamp: block.timestamp
+        }));
+        // Pool2 (0x3030/0x4040): Base is best by 50 bps, above threshold=5
+        feed.set(address(0x3030), address(0x4040), ILiquidityCache.LiquiditySnapshot({
+            unichainImpactBps: 60, baseImpactBps: 10, optimismImpactBps: 90,
+            timestamp: block.timestamp
+        }));
+
+        PM.SwapParams memory params = PM.SwapParams({
+            zeroForOne: true, amountSpecified: -int256(5_000), sqrtPriceLimitX96: 0
+        });
+
+        // Pool1 stays local
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapRouted(poolId, hook.CHAIN_UNICHAIN(), "local_best", 0);
+        vm.prank(poolManager);
+        hook.beforeSwap(address(this), key, params, "");
+
+        // Pool2 routes to Base
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapRouted(poolId2, hook.CHAIN_BASE(), "improvement_route", 50);
+        vm.prank(poolManager);
+        hook.beforeSwap(address(this), key2, params, "");
+    }
+
     function test_registerConfig_anyoneCanCall_and_afterInitialize_appliesIt() public {
         // Register as an arbitrary caller
         IPathfinder.PoolConfig memory cfg = IPathfinder.PoolConfig({

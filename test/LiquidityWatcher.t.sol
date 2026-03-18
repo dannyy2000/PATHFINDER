@@ -304,6 +304,76 @@ contract LiquidityWatcherTest is Test {
         assertEq(timestamp, 0);
     }
 
+    /// @dev First react for a pair always pushes to cache (BestState not yet initialized)
+    function test_react_firstUpdateAlwaysPushesToCache() external {
+        vm.warp(500);
+        _react(TOKEN_A, TOKEN_B, 1, 30); // first react ever — must write to cache
+
+        ILiquidityCache.LiquiditySnapshot memory snap = cache.getSnapshot(TOKEN_A, TOKEN_B);
+        assertEq(snap.baseImpactBps, 30);
+        assertEq(snap.timestamp, 500);
+    }
+
+    /// @dev All three chains accumulate independently inside the watcher's internal state
+    function test_react_allThreeChains_allImpactsStoredInWatcher() external {
+        vm.warp(700);
+        _react(TOKEN_A, TOKEN_B, 0, 80);  // unichain
+        _react(TOKEN_A, TOKEN_B, 1, 40);  // base
+        _react(TOKEN_A, TOKEN_B, 2, 25);  // optimism
+
+        ILiquidityCache.LiquiditySnapshot memory snap = watcher.getSnapshot(TOKEN_A, TOKEN_B);
+        assertEq(snap.unichainImpactBps, 80);
+        assertEq(snap.baseImpactBps, 40);
+        assertEq(snap.optimismImpactBps, 25);
+        assertEq(snap.timestamp, 700);
+    }
+
+    /// @dev getBestChainSnapshot returns the chain with lowest impact after all 3 are seen
+    function test_getBestChainSnapshot_returnsLowestImpactAfterAllChains() external {
+        vm.warp(800);
+        _react(TOKEN_A, TOKEN_B, 0, 100);  // unichain = 100 bps (worst)
+        _react(TOKEN_A, TOKEN_B, 1, 60);   // base = 60 bps
+        _react(TOKEN_A, TOKEN_B, 2, 15);   // optimism = 15 bps (best)
+
+        (uint8 bestChain, uint256 bestImpact, uint256 unichainImpact, uint256 timestamp) =
+            watcher.getBestChainSnapshot(TOKEN_A, TOKEN_B);
+
+        assertEq(bestChain, watcher.CHAIN_OPTIMISM());
+        assertEq(bestImpact, 15);
+        assertEq(unichainImpact, 100);
+        assertEq(timestamp, 800);
+    }
+
+    /// @dev When only base and optimism are seen (no unichain), best is still determined correctly
+    function test_getBestChainSnapshot_withoutUnichainSeen_baseBetterThanOptimism() external {
+        vm.warp(900);
+        _react(TOKEN_A, TOKEN_B, 1, 30);  // base seen
+        _react(TOKEN_A, TOKEN_B, 2, 50);  // optimism seen
+
+        (uint8 bestChain, uint256 bestImpact,,) = watcher.getBestChainSnapshot(TOKEN_A, TOKEN_B);
+
+        // Base has lower impact → base is best
+        assertEq(bestChain, watcher.CHAIN_BASE());
+        assertEq(bestImpact, 30);
+    }
+
+    /// @dev Watcher internal state is independent from cache state
+    function test_watcherSnapshot_isIndependentFromCacheSnapshot() external {
+        vm.warp(950);
+        _react(TOKEN_A, TOKEN_B, 1, 50); // pushes to cache since ranking changes
+        _react(TOKEN_A, TOKEN_B, 0, 20); // unichain now best — ranking changes, pushes again
+
+        // Watcher has latest internal state (all 2 chains)
+        ILiquidityCache.LiquiditySnapshot memory watcherSnap = watcher.getSnapshot(TOKEN_A, TOKEN_B);
+        assertEq(watcherSnap.baseImpactBps, 50);
+        assertEq(watcherSnap.unichainImpactBps, 20);
+
+        // Cache has the snapshot from the last push
+        ILiquidityCache.LiquiditySnapshot memory cacheSnap = cache.getSnapshot(TOKEN_A, TOKEN_B);
+        assertEq(cacheSnap.unichainImpactBps, 20);
+        assertEq(cacheSnap.baseImpactBps, 50);
+    }
+
     function _react(address tokenA, address tokenB, uint8 chain, uint256 impactBps) internal {
         watcher.react(abi.encode(tokenA, tokenB, chain, impactBps));
     }

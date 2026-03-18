@@ -25,7 +25,7 @@ contract InitializePool is Script {
 
     // Unichain Sepolia canonical tokens
     address constant WETH = 0x4200000000000000000000000000000000000006;
-    address constant USDC = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
+    address constant USDC = 0x31d0220469e10c4E71834a79b1f276d740d3768F;
 
     // Pool parameters
     uint24  constant FEE          = 3000;   // 0.3%

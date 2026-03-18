@@ -240,22 +240,39 @@ This segmentation means PATHFINDER is genuinely tailored to trade size, not just
 pathfinder/
 ├── src/
 │   ├── Pathfinder.sol              # Uniswap v4 hook — routing logic (deployed on Unichain)
-│   ├── LiquidityCache.sol          # Storage contract — holds latest snapshot (deployed on Unichain)
-│   ├── LiquidityWatcher.sol        # Reactive Smart Contract — cross-chain monitor (deployed on Reactive Network)
-│   ├── MockLiquidityFeed.sol       # Replaces LiquidityCache during testing — returns controllable hardcoded data
+│   ├── LiquidityCache.sol          # Storage contract — holds latest snapshot per pair (deployed on Unichain)
+│   ├── LiquidityWatcher.sol        # Reactive Smart Contract — cross-chain monitor (deployed on Reactive Lasna)
+│   ├── DemoImpactFeed.sol          # Publishable impact feed for testnet demos
+│   ├── MockLiquidityFeed.sol       # Replaces LiquidityCache during local testing — returns controllable data
 │   └── interfaces/
-│       ├── IPathfinder.sol         # Hook interface
+│       ├── IPathfinder.sol         # Hook + config interface
 │       ├── ILiquidityCache.sol     # Cache read/write interface
 │       └── ILiquidityWatcher.sol   # Reactive watcher interface
 ├── test/
-│   ├── Pathfinder.t.sol            # Unit tests — routing decisions, threshold logic, trade size segmentation
-│   ├── LiquidityWatcher.t.sol      # Unit tests — react() updates, staleness, chain ranking
-│   └── Integration.t.sol           # End-to-end — hook reads cache, routes, output verified
+│   ├── Pathfinder.t.sol            # Unit tests — routing decisions, thresholds, hook guards
+│   ├── PathfinderMore.t.sol        # Extended unit tests — boundary conditions, config edge cases
+│   ├── PathfinderExtras.t.sol      # Extra unit tests — pool isolation, selector and fee checks
+│   ├── PathfinderFuzz.t.sol        # Fuzz tests — routing invariants across arbitrary inputs
+│   ├── LiquidityCache.t.sol        # Unit tests — writer access control, pair normalization, events
+│   ├── LiquidityCacheExtras.t.sol  # Extra unit tests — writer rotation, pair isolation
+│   ├── LiquidityCacheFuzz.t.sol    # Fuzz tests — commutativity, persistence, access control
+│   ├── LiquidityWatcher.t.sol      # Unit tests — react() updates, chain ranking, Reactive path
+│   ├── DemoImpactFeed.t.sol        # Unit tests for DemoImpactFeed origin-chain emitter
+│   ├── DemoImpactFeedExtras.t.sol  # Extended tests for DemoImpactFeed
+│   ├── MockLiquidityFeed.t.sol     # Unit tests for MockLiquidityFeed test helper
+│   ├── MockLiquidityFeedExtras.t.sol
+│   ├── Integration.t.sol           # End-to-end — watcher → cache → Pathfinder → routing decision
+│   └── IntegrationExtras.t.sol     # Extended integration — small trade, whale, pair isolation
 ├── script/
-│   ├── Deploy.s.sol                # Deploys Pathfinder + LiquidityCache to Unichain Sepolia
-│   ├── DeployWatcher.s.sol         # Deploys LiquidityWatcher to Reactive Kopli
-│   ├── DeployMocks.s.sol           # Deploys MockLiquidityFeed for demo/testing
-│   └── SimulateRoute.s.sol         # Demo — drain Unichain, deepen Base, watch routing kick in
+│   ├── DeployLiquidityCache.s.sol  # Deploy LiquidityCache to Unichain Sepolia
+│   ├── DeployHook.s.sol            # Mine CREATE2 salt and deploy Pathfinder hook to Unichain Sepolia
+│   ├── DeployWatcher.s.sol         # Deploy LiquidityWatcher to Reactive Lasna
+│   ├── DeployMocks.s.sol           # Deploy DemoImpactFeed on Base Sepolia and Optimism Sepolia
+│   ├── SetWriter.s.sol             # Authorize LiquidityWatcher callback proxy in LiquidityCache
+│   ├── SubscribeMocks.s.sol        # Subscribe LiquidityWatcher to deployed mock feeds
+│   ├── InitializePool.s.sol        # Initialize USDC/WETH pool with Pathfinder hook
+│   ├── SmokeTest.s.sol             # Publish impact events and verify cache snapshot end-to-end
+│   └── DemoSwap.s.sol              # Full end-to-end demo — deploys tokens, writes snapshot, swaps
 ├── lib/                            # Forge dependencies
 ├── foundry.toml
 ├── .env.example
@@ -297,7 +314,7 @@ PATHFINDER's `beforeSwap` hook adds a routing computation step to every swap. On
 Reactive Network is the intelligence layer that makes routing decisions possible.
 
 **What it does:**
-- Deploys `LiquidityWatcher.sol` on Reactive Kopli — a Reactive Smart Contract that subscribes to Swap and ModifyLiquidity events on Uniswap pools across Ethereum, Base, Arbitrum, and Optimism simultaneously
+- Deploys `LiquidityWatcher.sol` on Reactive Lasna — a Reactive Smart Contract that subscribes to `ImpactUpdated` events emitted by `DemoImpactFeed` contracts on Base Sepolia and Optimism Sepolia
 - Every time a pool event fires on any of those chains, Reactive calls `react()` on the watcher with the event data
 - The watcher tracks reserves, price impact, and volume per chain per pair and maintains a live best-execution ranking
 - When the ranking changes, the watcher sends a callback transaction to `LiquidityCache.sol` on Unichain, writing the updated snapshot
@@ -334,26 +351,40 @@ cp .env.example .env
 ### Deploy to Unichain Sepolia
 
 ```bash
-# Deploy mock liquidity feeds first (testnet demo)
-forge script script/DeployMocks.s.sol \
-  --rpc-url unichain_sepolia \
-  --broadcast \
-  --verify
+# 1. Deploy LiquidityCache
+forge script script/DeployLiquidityCache.s.sol \
+  --rpc-url $UNICHAIN_SEPOLIA_RPC --broadcast --private-key $PRIVATE_KEY
 
-# Deploy the main PATHFINDER hook
-forge script script/Deploy.s.sol \
-  --rpc-url unichain_sepolia \
-  --broadcast \
-  --verify
+# 2. Mine CREATE2 salt and deploy Pathfinder hook
+forge script script/DeployHook.s.sol \
+  --rpc-url $UNICHAIN_SEPOLIA_RPC --broadcast --private-key $PRIVATE_KEY
+
+# 3. Authorize the watcher callback proxy to write to the cache
+forge script script/SetWriter.s.sol \
+  --rpc-url $UNICHAIN_SEPOLIA_RPC --broadcast --private-key $PRIVATE_KEY
+
+# 4. Initialize a USDC/WETH pool with the Pathfinder hook
+forge script script/InitializePool.s.sol \
+  --rpc-url $UNICHAIN_SEPOLIA_RPC --broadcast --private-key $PRIVATE_KEY
 ```
 
-### Deploy Liquidity Watcher on Reactive
+### Deploy Liquidity Watcher on Reactive Lasna
 
 ```bash
-# Deploy to Reactive Kopli testnet
-forge script script/Deploy.s.sol:DeployLiquidityWatcher \
-  --rpc-url reactive_kopli \
-  --broadcast
+# 1. Deploy DemoImpactFeed on Base Sepolia and Optimism Sepolia
+forge script script/DeployMocks.s.sol \
+  --rpc-url $BASE_SEPOLIA_RPC --broadcast --private-key $PRIVATE_KEY
+
+forge script script/DeployMocks.s.sol \
+  --rpc-url $OPTIMISM_SEPOLIA_RPC --broadcast --private-key $PRIVATE_KEY
+
+# 2. Deploy LiquidityWatcher to Reactive Lasna
+forge script script/DeployWatcher.s.sol \
+  --rpc-url $REACTIVE_LASNA_RPC --broadcast --private-key $PRIVATE_KEY
+
+# 3. Subscribe the watcher to the deployed mock feeds
+forge script script/SubscribeMocks.s.sol \
+  --rpc-url $REACTIVE_LASNA_RPC --broadcast --private-key $PRIVATE_KEY
 ```
 
 ---
@@ -362,53 +393,47 @@ forge script script/Deploy.s.sol:DeployLiquidityWatcher \
 
 The demo shows PATHFINDER detecting a better execution chain in real time and routing a swap there automatically.
 
-**Step 1 — Verify baseline**
+**Option A — Fully self-contained local demo (no live feeds needed)**
+
+`DemoSwap.s.sol` deploys its own mock tokens, writes a snapshot directly to `LiquidityCache`, initialises a pool, and executes a swap — confirming the `SwapRouted` event fires with `destination=CHAIN_OPTIMISM`.
+
 ```bash
-cast call $PATHFINDER_HOOK_ADDRESS "getBestChain(address,address,uint256)" \
-  $USDC $ETH 10000000000000000000 \
-  --rpc-url unichain_sepolia
-# Returns: 0 (Unichain) — currently local is best
+forge script script/DemoSwap.s.sol:DemoSwap \
+  --rpc-url $UNICHAIN_SEPOLIA_RPC \
+  --broadcast --private-key $PRIVATE_KEY -vvvv
+# Look for: SwapRouted(destination=2, reason="improvement_route", improvementBps=25)
 ```
 
-**Step 2 — Simulate thin liquidity on Unichain**
+**Option B — End-to-end with Reactive relay (live cross-chain flow)**
+
+**Step 1 — Publish impact readings on Base and Optimism**
 ```bash
-forge script script/SimulateRoute.s.sol:DrainUnichain \
-  --rpc-url unichain_sepolia \
-  --broadcast
-# Simulates large swaps making Unichain pool thin
+forge script script/SmokeTest.s.sol:PublishBase \
+  --rpc-url $BASE_SEPOLIA_RPC --broadcast --private-key $PRIVATE_KEY
+
+forge script script/SmokeTest.s.sol:PublishOptimism \
+  --rpc-url $OPTIMISM_SEPOLIA_RPC --broadcast --private-key $PRIVATE_KEY
 ```
 
-**Step 3 — Simulate deep liquidity on Base**
+**Step 2 — Wait ~30 seconds for the Reactive relay to fire**
+
+Reactive Network detects the `ImpactUpdated` events, calls `react()` on `LiquidityWatcher`, which pushes a fresh snapshot to `LiquidityCache` on Unichain.
+
+**Step 3 — Verify the snapshot landed**
 ```bash
-forge script script/SimulateRoute.s.sol:DeepBase \
-  --rpc-url base_sepolia \
-  --broadcast
-# Pushes mock liquidity data showing Base as deep
+forge script script/SmokeTest.s.sol:CheckCache \
+  --rpc-url $UNICHAIN_SEPOLIA_RPC -vvvv
+# Shows: Base impact bps, Optimism impact bps, timestamp
+# RESULT: snapshot live. End-to-end flow confirmed.
 ```
 
-**Step 4 — Watch Reactive update its ranking**
+**Step 4 — Inspect the live pool config**
 ```bash
-cast call $REACTIVE_WATCHER_ADDRESS "getBestChainSnapshot(address,address)" \
-  $USDC $ETH \
-  --rpc-url reactive_kopli
-# Returns: Base with 0.20% impact vs Unichain 0.50%
-```
-
-**Step 5 — Submit a swap and watch it route to Base**
-```bash
-forge script script/SimulateRoute.s.sol:SubmitSwap \
-  --rpc-url unichain_sepolia \
-  --broadcast
-# PATHFINDER intercepts, detects Base is better, routes cross-chain
-# User receives USDC on Unichain with Base-level execution
-```
-
-**Step 6 — Compare prices**
-```bash
-forge script script/SimulateRoute.s.sol:CompareOutputs \
-  --rpc-url unichain_sepolia
-# Shows side-by-side: local execution vs PATHFINDER-routed execution
-# Demonstrates the savings
+cast call $PATHFINDER_HOOK_ADDRESS \
+  "getPoolConfig(bytes32)(uint256,uint256,uint256,uint256)" \
+  $POOL_ID \
+  --rpc-url $UNICHAIN_SEPOLIA_RPC
+# Returns: routingThreshold, maxStaleness, smallTradeLimit, whaleTradeLimit
 ```
 
 ---
@@ -416,14 +441,20 @@ forge script script/SimulateRoute.s.sol:CompareOutputs \
 ## Testing
 
 ```bash
-# Run all tests
+# Run all tests (131 tests across 14 suites)
 forge test
 
-# Run with detailed output
+# Run with verbose output
 forge test -vvvv
 
-# Run only routing logic tests
+# Coverage report — scripts excluded automatically via foundry.toml
+forge coverage --report summary
+
+# Run only Pathfinder routing tests
 forge test --match-path test/Pathfinder.t.sol
+
+# Run only fuzz tests
+forge test --match-path "test/*Fuzz*"
 
 # Run integration tests
 forge test --match-path test/Integration.t.sol
@@ -431,6 +462,25 @@ forge test --match-path test/Integration.t.sol
 # Gas report
 forge test --gas-report
 ```
+
+**Test suite breakdown:**
+
+| Suite | Tests | What it covers |
+|---|---|---|
+| `PathfinderTest` | 22 | Core routing decisions, thresholds, hook guards |
+| `PathfinderMoreTest` | 14 | Boundary conditions, config edge cases |
+| `PathfinderExtrasTest` | 4 | Pool isolation, selector and fee return values |
+| `PathfinderFuzzTest` | 6 | Routing invariants under arbitrary inputs |
+| `LiquidityCacheTest` | 13 | Writer access, normalization, event emission |
+| `LiquidityCacheExtrasTest` | 9 | Writer rotation, pair isolation |
+| `LiquidityCacheFuzzTest` | 6 | Commutativity, persistence, access control |
+| `LiquidityWatcherTest` | 25 | react() updates, chain ranking, Reactive path |
+| `IntegrationTest` | 3 | End-to-end watcher → cache → routing |
+| `IntegrationExtrasTest` | 5 | Small trade, whale, pair isolation flows |
+| `DemoImpactFeedTest` | 5 | Origin-chain feed construction and publishing |
+| `DemoImpactFeedExtrasTest` | 8 | Extended feed scenarios |
+| `MockLiquidityFeedTest` | 2 | Test helper correctness |
+| `MockLiquidityFeedExtrasTest` | 9 | Extended mock scenarios |
 
 ---
 
@@ -457,11 +507,10 @@ Each pool deployed with PATHFINDER can configure its own routing parameters at i
 
 | Parameter | Description | Default |
 |---|---|---|
-| `routingThreshold` | Minimum improvement required to trigger cross-chain route | 0.15% |
+| `routingThreshold` | Minimum improvement (in bps) required to trigger cross-chain route | 15 bps (0.15%) |
 | `maxStaleness` | Maximum age of Reactive data accepted for routing decisions | 30 seconds |
-| `smallTradeLimit` | Trade size below which routing is skipped | $1,000 |
-| `whaleTradeLimit` | Trade size above which routing is always attempted | $500,000 |
-| `enabledChains` | Which chains Reactive monitors for this pool | All |
+| `smallTradeLimit` | Trade size below which routing is skipped entirely | 0 (disabled) |
+| `whaleTradeLimit` | Trade size at or above which routing is always attempted regardless of threshold | `type(uint256).max` (disabled) |
 
 ---
 

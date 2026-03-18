@@ -14,6 +14,8 @@ remappings = [
     "reactive-lib/=lib/reactive-lib/src/",
 ]
 
+no_match_coverage = "script/"
+
 [profile.default.fuzz]
 runs = 1000
 
