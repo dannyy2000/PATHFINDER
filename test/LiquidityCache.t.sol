@@ -101,6 +101,58 @@ contract LiquidityCacheTest is Test {
         assertEq(written.timestamp, 200);
     }
 
+    /// @dev Deployer is NOT automatically the authorized writer — initial writer is address(0)
+    function test_deployer_isNotAutomaticallyWriter() external {
+        assertEq(cache.authorizedWriter(), address(0));
+
+        // Deployer calling writeSnapshot before setWriter must revert
+        vm.expectRevert(LiquidityCache.Unauthorized.selector);
+        cache.writeSnapshot(TOKEN_A, TOKEN_B, _snapshot(1, 2, 3, 4));
+    }
+
+    /// @dev Deployer can call setWriter(self) and then write normally
+    function test_deployer_canSetSelfAsWriter() external {
+        cache.setWriter(address(this));
+        assertEq(cache.authorizedWriter(), address(this));
+
+        cache.writeSnapshot(TOKEN_A, TOKEN_B, _snapshot(10, 20, 30, 100));
+        ILiquidityCache.LiquiditySnapshot memory snap = cache.getSnapshot(TOKEN_A, TOKEN_B);
+        assertEq(snap.unichainImpactBps, 10);
+    }
+
+    /// @dev setWriter emits WriterUpdated with old and new addresses
+    function test_setWriter_emitsOldAndNewWriter() external {
+        cache.setWriter(WRITER);
+
+        address newWriter = address(0xABCD);
+        vm.expectEmit(true, true, false, false);
+        emit LiquidityCache.WriterUpdated(WRITER, newWriter);
+        cache.setWriter(newWriter);
+
+        assertEq(cache.authorizedWriter(), newWriter);
+    }
+
+    /// @dev writeSnapshot emits SnapshotWritten with correct tokenA, tokenB, timestamp
+    function test_writeSnapshot_emitsCorrectEvent() external {
+        cache.setWriter(WRITER);
+
+        vm.expectEmit(true, true, false, true);
+        emit LiquidityCache.SnapshotWritten(TOKEN_A, TOKEN_B, 999);
+
+        vm.prank(WRITER);
+        cache.writeSnapshot(TOKEN_A, TOKEN_B, _snapshot(5, 10, 15, 999));
+    }
+
+    /// @dev getSnapshot for an unwritten pair returns all-zero struct — no partial data leaks
+    function test_getSnapshot_unknownPairIsFullyZero() external view {
+        ILiquidityCache.LiquiditySnapshot memory snap =
+            cache.getSnapshot(address(0xAAAA), address(0xBBBB));
+        assertEq(snap.unichainImpactBps, 0);
+        assertEq(snap.baseImpactBps, 0);
+        assertEq(snap.optimismImpactBps, 0);
+        assertEq(snap.timestamp, 0);
+    }
+
     function _snapshot(uint256 unichain, uint256 base, uint256 optimism, uint256 timestamp)
         internal
         pure

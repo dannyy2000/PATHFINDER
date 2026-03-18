@@ -378,6 +378,45 @@ contract PathfinderTest is Test {
         hook.beforeSwap(address(this), key, params, "");
     }
 
+    /// Snapshot aged exactly MAX_STALENESS seconds is NOT stale (condition is >, not >=)
+    function test_staleness_exactlyAtLimit_isNotStale() public {
+        vm.warp(1_000);
+        feed.set(TOKEN_A, TOKEN_B, ILiquidityCache.LiquiditySnapshot({
+            unichainImpactBps: 100,
+            baseImpactBps:     10,
+            optimismImpactBps: 90,
+            timestamp:         block.timestamp - MAX_STALENESS   // age == limit, still fresh
+        }));
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true, amountSpecified: -int256(SMALL_LIMIT + 1), sqrtPriceLimitX96: 0
+        });
+
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapRouted(poolId, hook.CHAIN_BASE(), "improvement_route", 90);
+
+        vm.prank(poolManager);
+        hook.beforeSwap(address(this), key, params, "");
+    }
+
+    /// afterSwap with zeroForOne: true emits the correct flag
+    function test_afterSwap_zeroForOneTrue_emitsCorrectly() public {
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -int256(5_000),
+            sqrtPriceLimitX96: 0
+        });
+
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapSettled(poolId, -int256(5_000), true);
+
+        vm.prank(poolManager);
+        (bytes4 selector, int128 delta) = hook.afterSwap(address(this), key, params, BalanceDelta.wrap(0), "");
+
+        assertEq(selector, IHooks.afterSwap.selector);
+        assertEq(delta, 0);
+    }
+
     function test_afterSwap_emitsSettledEvent() public {
         IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
             zeroForOne: false,
@@ -404,6 +443,66 @@ contract PathfinderTest is Test {
 
         vm.expectRevert(Pathfinder.NotPoolManager.selector);
         hook.afterSwap(address(this), key, params, BalanceDelta.wrap(0), "");
+    }
+
+    /// routingThreshold = 0 means any improvement > 0 bps routes cross-chain
+    function test_routingThreshold_zero_routesOnAnyImprovement() public {
+        // Deploy a fresh hook with threshold=0
+        Pathfinder hookZero = new Pathfinder(IPoolManager(poolManager), ILiquidityCache(address(feed)));
+        PoolKey memory keyZero = PoolKey({
+            currency0:   Currency.wrap(address(0x5000)),
+            currency1:   Currency.wrap(address(0x6000)),
+            fee:         500,
+            tickSpacing: 10,
+            hooks:       IHooks(address(hookZero))
+        });
+        bytes32 pidZero = PoolId.unwrap(keyZero.toId());
+
+        hookZero.registerConfig(keyZero, IPathfinder.PoolConfig({
+            routingThreshold: 0,     // any improvement > 0 should route
+            maxStaleness:     MAX_STALENESS,
+            smallTradeLimit:  SMALL_LIMIT,
+            whaleTradeLimit:  WHALE_LIMIT
+        }));
+        vm.prank(poolManager);
+        hookZero.afterInitialize(address(this), keyZero, 0, 0);
+
+        // Improvement = 1 bps (tiny) — with threshold=0, 1 > 0 so it routes
+        feed.set(address(0x5000), address(0x6000), ILiquidityCache.LiquiditySnapshot({
+            unichainImpactBps: 51,
+            baseImpactBps:     50,
+            optimismImpactBps: 80,
+            timestamp:         block.timestamp
+        }));
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true, amountSpecified: -int256(SMALL_LIMIT + 1), sqrtPriceLimitX96: 0
+        });
+
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapRouted(pidZero, hookZero.CHAIN_BASE(), "improvement_route", 1);
+
+        vm.prank(poolManager);
+        hookZero.beforeSwap(address(this), keyZero, params, "");
+    }
+
+    /// Positive amountSpecified at exactly whaleTradeLimit triggers whale route
+    function test_beforeSwap_positiveAmountAtWhaleLimit_triggersWhaleRoute() public {
+        // Improvement is only 5 bps (below threshold=15), but trade is a whale
+        ILiquidityCache.LiquiditySnapshot memory snap = _snap(100, 95, 120);
+        feed.set(TOKEN_A, TOKEN_B, snap);
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: int256(WHALE_LIMIT), // positive — exactOut
+            sqrtPriceLimitX96: 0
+        });
+
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapRouted(poolId, hook.CHAIN_BASE(), "whale_route", 5);
+
+        vm.prank(poolManager);
+        hook.beforeSwap(address(this), key, params, "");
     }
 
     function test_unusedHooks_revert() public {

@@ -138,6 +138,49 @@ contract PathfinderMoreTest is Test {
         _expectRoute("improvement_route", hook.CHAIN_OPTIMISM(), 90, 5_000);
     }
 
+    function test_afterInitialize_partialZeroConfig_doesNotApplyDefaults() external {
+        // maxStaleness == 0 but routingThreshold != 0 — AND condition not met, defaults NOT applied
+        hook.registerConfig(key, _config(5, 0, 0, type(uint256).max));
+        vm.prank(POOL_MANAGER);
+        hook.afterInitialize(address(this), key, 0, 0);
+
+        IPathfinder.PoolConfig memory cfg = hook.getPoolConfig(poolId);
+        assertEq(cfg.routingThreshold, 5, "should use registered threshold, not default");
+        assertEq(cfg.maxStaleness, 0,      "should stay 0, not be replaced by default");
+    }
+
+    function test_registerConfig_afterInit_doesNotAffectActiveConfig() external {
+        _initConfig(); // threshold=15, staleness=30
+
+        IPathfinder.PoolConfig memory before = hook.getPoolConfig(poolId);
+        assertEq(before.routingThreshold, 15);
+
+        // Calling registerConfig again only writes to pending — active config unchanged
+        hook.registerConfig(key, _config(99, 999, 0, type(uint256).max));
+
+        IPathfinder.PoolConfig memory after_ = hook.getPoolConfig(poolId);
+        assertEq(after_.routingThreshold, 15, "active config must not change");
+        assertEq(after_.maxStaleness, 30,      "active staleness must not change");
+    }
+
+    function test_beforeSwap_whaleLimitMinusOne_doesNotWhaleRoute() external {
+        _initConfig(); // threshold=15, whale=1_000_000
+        // improvement = 5 bps, below threshold — trade at WHALE_LIMIT-1 must not trigger whale path
+        feed.set(TOKEN_A, TOKEN_B, _snapshot(100, 95, 120, block.timestamp));
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: true,
+            amountSpecified: -int256(1_000_000 - 1),
+            sqrtPriceLimitX96: 0
+        });
+
+        vm.expectEmit(true, false, false, true);
+        emit Pathfinder.SwapRouted(poolId, hook.CHAIN_UNICHAIN(), "below_threshold", 0);
+
+        vm.prank(POOL_MANAGER);
+        hook.beforeSwap(address(this), key, params, "");
+    }
+
     function _initConfig() internal {
         hook.registerConfig(key, _config(15, 30, 1_000, 1_000_000));
         vm.prank(POOL_MANAGER);
