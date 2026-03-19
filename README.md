@@ -1,6 +1,6 @@
 # PATHFINDER
 
-> A Uniswap v4 hook that routes every swap to the chain with the best liquidity — automatically, atomically, from a single transaction on Unichain.
+> A Uniswap v4 hook that identifies the chain with the best liquidity and signals the optimal routing decision on-chain — automatically, from a single transaction on Unichain.
 
 ---
 
@@ -28,9 +28,9 @@ The problem is not that good liquidity does not exist — it is that your swap h
 
 ## The Solution
 
-PATHFINDER is a Uniswap v4 hook on Unichain that intercepts every swap before execution, checks real-time liquidity conditions across all major chains, and routes the trade to where it gets the best price — all from the single transaction the user already submitted.
+PATHFINDER is a Uniswap v4 hook on Unichain that intercepts every swap before execution, checks real-time liquidity conditions across all major chains, and signals the optimal routing decision on-chain — all from the single transaction the user already submitted.
 
-No manual chain-checking. No bridging. No multiple transactions. One swap, best price, whatever chain it is on.
+No manual chain-checking. No multiple transactions. The hook reads live cross-chain data and emits the best venue — the foundation for a settlement layer to execute there automatically.
 
 ---
 
@@ -80,7 +80,7 @@ Result: Route to Base (0.30% improvement — worth routing)
 
 If Unichain is already the best — the swap executes on Unichain, no routing needed.
 
-If Base or Optimism is meaningfully better — PATHFINDER routes there via Superchain native interop.
+If Base or Optimism is meaningfully better — PATHFINDER emits `SwapRouted` signalling that chain as the best venue. A settlement layer consuming this signal can execute there via Superchain native interop (M2).
 
 Ethereum and Arbitrum data informs the snapshot (Reactive watches their pools) but PATHFINDER never routes execution there — bridging to non-Superchain chains is slow, multi-transaction, and not atomic.
 
