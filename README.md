@@ -293,33 +293,38 @@ pathfinder/
 
 ### Unichain
 
-PATHFINDER is built specifically around Unichain's unique position in the ecosystem and relies on two of its properties:
+**Where in the code:**
+- `src/Pathfinder.sol` — hook deployed on Unichain. `_bestExecutableChain()` only ever considers `CHAIN_BASE` (1) and `CHAIN_OPTIMISM` (2) as routing destinations because they are Superchain members. `CHAIN_UNICHAIN` (0) is the local fallback.
+- `src/LiquidityCache.sol` — storage contract deployed on Unichain, read by the hook inside `beforeSwap` as a local call
+- `script/DeployHook.s.sol`, `script/DeployLiquidityCache.s.sol`, `script/InitializePool.s.sol` — deployment to Unichain Sepolia
 
-**1. Superchain Native Interoperability**
-Unichain is part of the Optimism Superchain. PATHFINDER is designed around this membership — it only ever signals Base and Optimism as routing destinations because they are the Superchain members where cross-chain settlement can eventually happen via `L2ToL2CrossDomainMessenger` and `SuperchainERC20` natively. Ethereum and Arbitrum are excluded from routing targets precisely because they are not Superchain members and would require a non-atomic external bridge. The routing intelligence layer (this hook) is built so a Superchain settlement layer can be added on top without changing the hook itself.
+**What the integration does:**
+
+**1. Superchain-Aware Routing Targets**
+The hook hardcodes only Base and Optimism as cross-chain destinations (`CHAIN_BASE = 1`, `CHAIN_OPTIMISM = 2` in `src/Pathfinder.sol`). Ethereum and Arbitrum are explicitly excluded — they are not Superchain members and routing there would require a non-atomic external bridge. The `SwapRouted` event signals the optimal Superchain venue so a settlement layer can consume it and execute via `L2ToL2CrossDomainMessenger` without changing the hook.
 
 **2. Speed**
-Unichain's 1-second blocks mean the routing decision and execution happen before liquidity conditions change. A 12-second block window on Ethereum mainnet is long enough for conditions to shift between when Reactive provides its snapshot and when the swap actually executes. Unichain's speed keeps the routing data fresh and the execution accurate.
+Unichain's 1-second blocks mean the routing decision runs before liquidity conditions shift. The hook reads `LiquidityCache` locally — no cross-chain call happens during the swap.
 
 **3. Low Gas**
-PATHFINDER's `beforeSwap` hook adds a routing computation step to every swap. On Ethereum mainnet this extra computation would meaningfully increase swap costs. On Unichain the gas cost is negligible — routing intelligence comes essentially for free.
+The `beforeSwap` computation is a single storage read + comparison. On Unichain gas costs are negligible — routing intelligence adds no meaningful overhead per swap.
+
+---
 
 ### Reactive Network
 
-Reactive Network is the intelligence layer that makes routing decisions possible.
+**Where in the code:**
+- `src/LiquidityWatcher.sol` — Reactive Smart Contract deployed on Reactive Lasna. Subscribes to `ImpactUpdated` events from `DemoImpactFeed` contracts on Base Sepolia and Optimism Sepolia. `react()` is the Reactive-called entry point that updates chain rankings and pushes to `LiquidityCache` when the best chain changes.
+- `src/DemoImpactFeed.sol` — origin-chain event emitter deployed on Base Sepolia and Optimism Sepolia. Publishes `ImpactUpdated(tokenA, tokenB, chain, impactBps)` which Reactive subscribes to.
+- `src/LiquidityCache.sol` — receives the callback write from the watcher via `writeSnapshot()`
+- `script/DeployWatcher.s.sol`, `script/DeployMocks.s.sol`, `script/SubscribeMocks.s.sol` — deployment and subscription to Reactive Lasna
 
-**What it does:**
-- Deploys `LiquidityWatcher.sol` on Reactive Lasna — a Reactive Smart Contract that subscribes to `ImpactUpdated` events emitted by `DemoImpactFeed` contracts on Base Sepolia and Optimism Sepolia
-- Every time a pool event fires on any of those chains, Reactive calls `react()` on the watcher with the event data
-- The watcher tracks reserves, price impact, and volume per chain per pair and maintains a live best-execution ranking
-- When the ranking changes, the watcher sends a callback transaction to `LiquidityCache.sol` on Unichain, writing the updated snapshot
-- This runs continuously in the background — it is not triggered by user swaps
+**What the integration does:**
 
-**Why it is essential:**
-The PATHFINDER hook on Unichain is completely blind to what is happening on other chains. It cannot natively read the state of a Base pool or an Arbitrum pool. Reactive Network bridges that gap — it is the eyes of the system. Without it, PATHFINDER has no data to route with and becomes an ordinary hook. The entire value proposition — best execution across chains — only exists because of Reactive.
+`LiquidityWatcher.react()` is triggered automatically by Reactive Network every time an `ImpactUpdated` event fires on Base or Optimism. The watcher compares the new impact against its stored rankings — if the best chain changes, it calls `LiquidityCache.writeSnapshot()` on Unichain, keeping the cache continuously fresh. PATHFINDER's hook reads this cache at swap time. Without Reactive, the hook has no cross-chain data and cannot make routing decisions — the entire value proposition depends on this integration.
 
 **Why not a traditional oracle:**
-Traditional price oracles tell you the price. Reactive tells you the liquidity conditions — depth, impact, spread, freshness — for a specific trade size at this specific moment. That is a fundamentally different and more useful data type for routing decisions.
+Traditional price oracles report a price. Reactive reports liquidity conditions — impact, depth, freshness — for a specific pair at this specific moment. That is the data type routing decisions require.
 
 ---
 
